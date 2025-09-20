@@ -10,22 +10,25 @@ import { LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, Re
 import { motion } from "framer-motion";
 
 /*
-  Emotion Likelihood Explorer (probability-normalized)
-  ------------------------------------------------------------
-  横軸: θ (deg)
-  縦軸: 各感情 (Anger / Sad / Neutral / Joy) の確率 P(Emotion | θ, ...)
+  Emotion Likelihood Explorer (self/other, probability-normalized)
+  ----------------------------------------------------------------
+  ◇ 横軸: θ (deg)
+  ◇ 縦軸: 各感情 (Anger / Sad / Neutral / Joy) の確率 P(Emotion | θ, ...)
 
-  変更点（重要）:
-  - emotionScoresFromS() で得た4カテゴリのスコアを
-      p_k = (s_k + ε) / Σ_j (s_j + ε)
-    に正規化して確率として使用
-  - Y軸ラベルを "probability" に変更
+  この版の主な更新点:
+  - 効用 U^{other}(x) = cosθ * <w_other, q-x> + sinθ * <w_self, x>
+      → 役割分離（self/other）・複数論点の最新版の式に対応
+  - w_self / w_other は符号付き。各成分は |w_i| ≤ w_max にクリップ（L1正規化は行わない）
+  - 満足度は softmax 由来の S = exp(β (U - Umax)) を使用（0< S ≤ 1）
+  - 感情スコア g_k(S) を最後に確率へ正規化: P_k = (g_k + ε) / Σ_j (g_j + ε)
+  - UI を self/other で明示化
 */
 
 const deg2rad = (d: number) => (Math.PI / 180) * d;
 
 function enumerateCandX(q: number[]): number[][] {
   const xs: number[][] = [];
+  // 注意: q が大きいと組合せが爆発します。検証用の小規模ケースを想定。
   for (let x1 = 0; x1 <= q[0]; x1++)
     for (let x2 = 0; x2 <= q[1]; x2++)
       for (let x3 = 0; x3 <= q[2]; x3++)
@@ -43,39 +46,54 @@ function add(a: number[], b: number[], sign = 1) {
   return a.map((ai, i) => ai + sign * b[i]);
 }
 
-function utility(thetaRad: number, w: number[], x: number[], q: number[]) {
-  const xOther = add(q, x, -1);
-  return Math.cos(thetaRad) * dot(w, x) + Math.sin(thetaRad) * dot(w, xOther);
+function clamp(v: number, lo: number, hi: number) {
+  return Math.max(lo, Math.min(hi, v));
 }
 
-function satisfaction(thetaRad: number, w: number[], x: number[], q: number[], beta: number, candX: number[][]) {
+function clampWeights(w: number[], wmax: number) {
+  return w.map((wi) => clamp(wi, -wmax, wmax));
+}
+
+// --- 最新の効用: self/other 役割分離 ---
+function utility(thetaRad: number, wSelf: number[], wOther: number[], x: number[], q: number[]) {
+  const xOther = add(q, x, -1); // other の取り分 = q - x
+  return Math.cos(thetaRad) * dot(wOther, xOther) + Math.sin(thetaRad) * dot(wSelf, x);
+}
+
+// 満足度（softmax 由来）: S = exp(β (U - Umax)) ∈ (0,1]
+function satisfaction(
+  thetaRad: number,
+  wSelf: number[],
+  wOther: number[],
+  x: number[],
+  q: number[],
+  beta: number,
+  candX: number[][]
+) {
   let umax = -Infinity;
-  for (const xx of candX) umax = Math.max(umax, utility(thetaRad, w, xx, q));
-  const u = utility(thetaRad, w, x, q);
-  return Math.exp(beta * (u - umax)); // in (0,1]
+  for (const xx of candX) umax = Math.max(umax, utility(thetaRad, wSelf, wOther, xx, q));
+  const u = utility(thetaRad, wSelf, wOther, x, q);
+  return Math.exp(beta * (u - umax));
 }
 
+// 区分線形スコア（未正規化）
 function emotionScoresFromS(S: number, tau1: number, tau2: number, sadBand: number) {
-  const clamp = (v: number, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, v));
-  const anger = clamp((tau1 - S) / tau1);
+  const clamp01 = (v: number) => clamp(v, 0, 1);
+  const anger = clamp01((tau1 - S) / tau1);
   const sad = Math.abs(S - tau1) <= sadBand ? 1 - Math.abs(S - tau1) / sadBand : 0;
   let neutral = 0;
   if (S > tau1 && S < tau2) {
     const mid = (tau1 + tau2) / 2;
     const width = (tau2 - tau1) / 2;
-    neutral = clamp(1 - Math.abs(S - mid) / width);
+    neutral = clamp01(1 - Math.abs(S - mid) / width);
   }
-  const joy = clamp((S - tau2) / (1 - tau2));
+  const joy = clamp01((S - tau2) / (1 - tau2));
   return { Anger: anger, Sad: sad, Neutral: neutral, Joy: joy };
 }
 
-// --- NEW: normalize 4-category scores into probabilities ---
+// スコア → 確率正規化
 function scoresToProbs(scores: { [k: string]: number }, eps = 1e-9) {
-  const total =
-    (scores.Anger + eps) +
-    (scores.Sad + eps) +
-    (scores.Neutral + eps) +
-    (scores.Joy + eps);
+  const total = (scores.Anger + eps) + (scores.Sad + eps) + (scores.Neutral + eps) + (scores.Joy + eps);
   return {
     Anger: (scores.Anger + eps) / total,
     Sad: (scores.Sad + eps) / total,
@@ -90,29 +108,6 @@ const EMO_COLORS: Record<string, string> = {
   Neutral: "#7f7f7f",
   Joy: "#2ca02c",
 };
-
-function NumberField({
-  label, value, onChange, step = 0.01, min, max, suffix,
-}: {
-  label: string; value: number; onChange: (v: number) => void;
-  step?: number; min?: number; max?: number; suffix?: string;
-}) {
-  return (
-    <div className="flex items-center gap-3">
-      <Label className="w-28 text-sm text-muted-foreground">{label}</Label>
-      <Input
-        type="number"
-        value={value}
-        step={step}
-        min={min}
-        max={max}
-        onChange={(e) => onChange(parseFloat(e.target.value))}
-        className="w-28"
-      />
-      {suffix ? <span className="text-sm text-muted-foreground">{suffix}</span> : null}
-    </div>
-  );
-}
 
 function SliderField({
   label, value, onChange, min = 0, max = 1, step = 0.01,
@@ -131,41 +126,41 @@ function SliderField({
   );
 }
 
-function normalize(w: number[]) {
-  const s = w.reduce((a, b) => a + b, 0) || 1;
-  return w.map((v) => v / s);
-}
-
 export default function LikelihoodExplorer() {
   // --- Parameters ---
   const [q, setQ] = useState<number[]>([7, 5, 5, 5]);
   const [x, setX] = useState<number[]>([3, 2, 2, 1]);
-  const [w, setW] = useState<number[]>([0.5, 0.2, 0.2, 0.1]);
-  const [beta, setBeta] = useState<number>(0.5);
+  const [wSelf, setWSelf] = useState<number[]>([0.6, 0.2, 0.1, 0.1]);
+  const [wOther, setWOther] = useState<number[]>([0.5, -0.2, 0.3, 0.1]);
+  const [wMax, setWMax] = useState<number>(4);
+  const [beta, setBeta] = useState<number>(0.8);
   const [tau1, setTau1] = useState<number>(0.4);
   const [tau2, setTau2] = useState<number>(0.7);
   const [sadBand, setSadBand] = useState<number>(0.02);
   const [thetaStep, setThetaStep] = useState<number>(1);
 
-  const wNorm = useMemo(() => normalize(w), [w]);
+  const wSelfClamped = useMemo(() => clampWeights(wSelf, wMax), [wSelf, wMax]);
+  const wOtherClamped = useMemo(() => clampWeights(wOther, wMax), [wOther, wMax]);
   const candX = useMemo(() => enumerateCandX(q.map((v) => Math.round(v))), [q]);
 
   const data = useMemo(() => {
     const rows: Array<{ [k: string]: number }> = [];
     for (let th = -90; th <= 90; th += thetaStep) {
-      const S = satisfaction(deg2rad(th), wNorm, x, q, beta, candX);
+      const S = satisfaction(deg2rad(th), wSelfClamped, wOtherClamped, x, q, beta, candX);
       const emoScores = emotionScoresFromS(S, tau1, tau2, sadBand);
-      const emoProbs = scoresToProbs(emoScores); // <-- normalize to probabilities
+      const emoProbs = scoresToProbs(emoScores); // ← 正規化して確率
       rows.push({ theta: th, ...emoProbs });
     }
     return rows;
-  }, [wNorm, x, q, beta, tau1, tau2, sadBand, thetaStep, candX]);
+  }, [wSelfClamped, wOtherClamped, x, q, beta, tau1, tau2, sadBand, thetaStep, candX]);
 
   const reset = () => {
     setQ([7, 5, 5, 5]);
     setX([3, 2, 2, 1]);
-    setW([0.5, 0.2, 0.2, 0.1]);
-    setBeta(0.5);
+    setWSelf([0.6, 0.2, 0.1, 0.1]);
+    setWOther([0.5, -0.2, 0.3, 0.1]);
+    setWMax(4);
+    setBeta(0.8);
     setTau1(0.4);
     setTau2(0.7);
     setSadBand(0.02);
@@ -175,7 +170,7 @@ export default function LikelihoodExplorer() {
   return (
     <div className="p-6 grid gap-6 lg:grid-cols-2">
       <motion.h1 initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} className="text-2xl font-semibold">
-        Emotion Likelihood Explorer
+        Emotion Likelihood Explorer (self/other)
       </motion.h1>
 
       <Card className="lg:row-span-2 shadow-md">
@@ -215,52 +210,71 @@ export default function LikelihoodExplorer() {
       </Card>
 
       <Card className="shadow-md">
-        <CardContent className="pt-6 space-y-5">
+        <CardContent className="pt-6 space-y-6">
           <h2 className="text-lg font-medium">Scenario</h2>
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-3">
-              <Label className="text-sm text-muted-foreground">q (total quantities)</Label>
-              <div className="grid grid-cols-4 gap-2">
-                {q.map((qi, i) => (
-                  <Input key={i} type="number" min={0} step={1} value={qi} onChange={(e) => {
-                    const v = Math.max(0, Math.round(parseFloat(e.target.value)) || 0);
-                    const next = [...q];
-                    next[i] = v;
-                    setQ(next);
-                  }} />
-                ))}
-              </div>
-            </div>
-            <div className="space-y-3">
-              <Label className="text-sm text-muted-foreground">x (proposal)</Label>
-              <div className="grid grid-cols-4 gap-2">
-                {x.map((xi, i) => (
-                  <Input key={i} type="number" min={0} step={1} value={xi} onChange={(e) => {
-                    const v = Math.max(0, Math.round(parseFloat(e.target.value)) || 0);
-                    const next = [...x];
-                    next[i] = v;
-                    setX(next);
-                  }} />
-                ))}
-              </div>
-              <p className="text-xs text-muted-foreground">0 ≤ x_i ≤ q_i を満たすように手で調整してください。</p>
-            </div>
-          </div>
 
-          <div className="space-y-2">
-            <Label className="text-sm text-muted-foreground">w (issue weights, auto-normalized)</Label>
+          <div className="space-y-3">
+            <Label className="text-sm text-muted-foreground">q (total quantities)</Label>
             <div className="grid grid-cols-4 gap-2">
-              {w.map((wi, i) => (
-                <Input key={i} type="number" step={0.01} value={wi} onChange={(e) => {
-                  const v = parseFloat(e.target.value);
-                  const next = [...w];
-                  next[i] = isNaN(v) ? 0 : v;
-                  setW(next);
+              {q.map((qi, i) => (
+                <Input key={i} type="number" min={0} step={1} value={qi} onChange={(e) => {
+                  const v = Math.max(0, Math.round(parseFloat(e.target.value)) || 0);
+                  const next = [...q];
+                  next[i] = v;
+                  setQ(next);
                 }} />
               ))}
             </div>
+          </div>
+
+          <div className="space-y-3">
+            <Label className="text-sm text-muted-foreground">x (proposal: self's share)</Label>
+            <div className="grid grid-cols-4 gap-2">
+              {x.map((xi, i) => (
+                <Input key={i} type="number" min={0} step={1} value={xi} onChange={(e) => {
+                  const v = Math.max(0, Math.round(parseFloat(e.target.value)) || 0);
+                  const next = [...x];
+                  next[i] = v;
+                  setX(next);
+                }} />
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground">0 ≤ x_i ≤ q_i を満たすように手で調整してください。</p>
+          </div>
+
+          <div className="space-y-4">
+            <Label className="text-sm text-muted-foreground">w_self (issue weights of self; signed, |w_i| ≤ w_max)</Label>
+            <div className="grid grid-cols-4 gap-2">
+              {wSelf.map((wi, i) => (
+                <Input key={i} type="number" step={0.01} value={wi} onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  const next = [...wSelf];
+                  next[i] = isNaN(v) ? 0 : v;
+                  setWSelf(next);
+                }} />
+              ))}
+            </div>
+
+            <Label className="text-sm text-muted-foreground">w_other (issue weights of other; signed, |w_i| ≤ w_max)</Label>
+            <div className="grid grid-cols-4 gap-2">
+              {wOther.map((wi, i) => (
+                <Input key={i} type="number" step={0.01} value={wi} onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  const next = [...wOther];
+                  next[i] = isNaN(v) ? 0 : v;
+                  setWOther(next);
+                }} />
+              ))}
+            </div>
+
+            <div className="flex items-center gap-3">
+              <Label className="w-28 text-sm text-muted-foreground">w_max</Label>
+              <Input type="number" step={0.1} min={0} value={wMax} onChange={(e) => setWMax(Math.max(0, parseFloat(e.target.value) || 0))} className="w-28" />
+              <span className="text-xs text-muted-foreground">入力値は描画時に [−w_max, w_max] にクリップされます。</span>
+            </div>
+
             <p className="text-xs text-muted-foreground">
-              現在の合計: {(w.reduce((a, b) => a + b, 0)).toFixed(3)} → 正規化後: [{wNorm.map((v) => v.toFixed(3)).join(", ")}]
+              現在の w_self (clamped): [{wSelfClamped.map((v) => v.toFixed(3)).join(", ")}] / w_other (clamped): [{wOtherClamped.map((v) => v.toFixed(3)).join(", ")}]
             </p>
           </div>
         </CardContent>
@@ -270,7 +284,7 @@ export default function LikelihoodExplorer() {
         <CardContent className="pt-5 text-sm text-muted-foreground space-y-2">
           <p>Tips:</p>
           <ul className="list-disc pl-5 space-y-1">
-            <li>β を大きくすると S=exp(β(U−Umax)) が鋭くなり、Joy/Anger の確率が極端になりがちです。</li>
+            <li>β を大きくすると S = exp(β (U − Umax)) が鋭くなり、Joy/Anger の確率が極端になりがちです。</li>
             <li>τ1, τ2 を動かして境界条件の影響を確認できます（Sad は τ1±sad_band の帯域）。</li>
             <li>q を大きくし過ぎると candX の組合せ数が増えて描画が重くなります。</li>
           </ul>
