@@ -178,7 +178,7 @@ export default function LikelihoodExplorer() {
   return (
     <div className="p-6 grid gap-6 xl:grid-cols-2">
       <motion.h1 initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} className="text-2xl font-semibold">
-        Emotion Likelihood Explorer (other's emotion likelihood)
+        Emotion Likelihood Explorer (other emotion likelihood)
       </motion.h1>
 
       {/* --- グラフ（other の感情尤度） --- */}
