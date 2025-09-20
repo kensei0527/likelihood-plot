@@ -228,7 +228,7 @@ export default function LikelihoodExplorer() {
           </div>
 
           <div className="space-y-3">
-            <Label className="text-sm text-muted-foreground">x (proposal: self's share)</Label>
+            <Label className="text-sm text-muted-foreground">x (proposal: self share)</Label>
             <div className="grid grid-cols-4 gap-2">
               {x.map((xi, i) => (
                 <Input key={i} type="number" min={0} step={1} value={xi} onChange={(e) => {
