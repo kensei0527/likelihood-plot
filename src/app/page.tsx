@@ -265,7 +265,7 @@ export default function LikelihoodExplorer() {
       <Card className="shadow-md xl:col-span-2">
         <CardContent className="pt-6 space-y-6">
           <div className="flex items-center justify-between">
-            <h2 className="text-lg font-medium">Division (x is self's share, q − x is other's share)</h2>
+            <h2 className="text-lg font-medium">Division (x is self share, q − x is other share)</h2>
             <Button variant="outline" onClick={reset}>Reset</Button>
           </div>
 
