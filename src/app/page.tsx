@@ -11,18 +11,15 @@ import { motion } from "framer-motion";
 
 /*
   Emotion Likelihood Explorer (self/other, probability-normalized)
-  ----------------------------------------------------------------
-  ◇ 横軸: θ (deg)
-  ◇ 縦軸: 各感情 (Anger / Sad / Neutral / Joy) の確率 P_other(Emotion | θ, ...)
+  — weights-as-points variant —
 
-  この版の主な更新点:
-  - 効用 U^{other}(x) = cosθ * <w_other, q-x> + sinθ * <w_self, x>
-      → 役割分離（self/other）・複数論点の最新版の式に対応
-  - w_self / w_other は符号付き。各成分は |w_i| ≤ w_max にクリップ（L1正規化は行わない）
-  - 満足度は softmax 由来の S = exp(β (U − Umax)) を使用（0< S ≤ 1）
-  - 感情スコア g_k(S) を最後に確率へ正規化: P_k = (g_k + ε) / Σ_j (g_j + ε)
-  - **配分（Division）をスライダー**で操作（0〜q_i、1刻み）。x は self（提案者）の取り分、q−x は other（感情表出者）の取り分とUIに明記。
-  - 重み w は **0.1 ステップ**で操作できるように変更。
+  変更点（あなたの要望）
+  - "各論点のポイント" は固定値ではなく **嗜好重み w × アイテム数** として表示・計算する
+    → Your Point 列は q_i × w_self,i（self側の価値基準）
+      Opponent Point は q_i × w_other,i（other側の価値基準）
+  - Division スライダーで x_i を 0..q_i（1刻み）
+  - w_self / w_other は ±w_max を **0.1刻み**スライダーで編集
+  - グラフは other の感情尤度 P_other(E | θ, x, w_self, w_other)
 */
 
 const deg2rad = (d: number) => (Math.PI / 180) * d;
@@ -54,13 +51,13 @@ function clampWeights(w: number[], wmax: number) {
   return w.map((wi) => clamp(wi, -wmax, wmax));
 }
 
-// --- 最新の効用: self/other 役割分離 ---
+// --- other の効用 ---
 function utility(thetaRad: number, wSelf: number[], wOther: number[], x: number[], q: number[]) {
   const xOther = add(q, x, -1); // other の取り分 = q − x
   return Math.cos(thetaRad) * dot(wOther, xOther) + Math.sin(thetaRad) * dot(wSelf, x);
 }
 
-// 満足度（softmax 由来）: S = exp(β (U − Umax)) ∈ (0,1]
+// S = exp(β (U − Umax))
 function satisfaction(
   thetaRad: number,
   wSelf: number[],
@@ -76,7 +73,6 @@ function satisfaction(
   return Math.exp(beta * (u - umax));
 }
 
-// 区分線形スコア（未正規化）
 function emotionScoresFromS(S: number, tau1: number, tau2: number, sadBand: number) {
   const clamp01 = (v: number) => clamp(v, 0, 1);
   const anger = clamp01((tau1 - S) / tau1);
@@ -91,7 +87,6 @@ function emotionScoresFromS(S: number, tau1: number, tau2: number, sadBand: numb
   return { Anger: anger, Sad: sad, Neutral: neutral, Joy: joy };
 }
 
-// スコア → 確率正規化
 function scoresToProbs(scores: { [k: string]: number }, eps = 1e-9) {
   const total = (scores.Anger + eps) + (scores.Sad + eps) + (scores.Neutral + eps) + (scores.Joy + eps);
   return {
@@ -109,25 +104,8 @@ const EMO_COLORS: Record<string, string> = {
   Joy: "#2ca02c",
 };
 
-function SliderField({
-  label, value, onChange, min = 0, max = 1, step = 0.1,
-}: {
-  label: string; value: number; onChange: (v: number[]) => void;
-  min?: number; max?: number; step?: number;
-}) {
-  return (
-    <div className="space-y-2">
-      <div className="flex justify-between">
-        <Label className="text-sm text-muted-foreground">{label}</Label>
-        <span className="text-xs tabular-nums">{value.toFixed(2)}</span>
-      </div>
-      <Slider value={[value]} min={min} max={max} step={step} onValueChange={(arr) => onChange(arr)} />
-    </div>
-  );
-}
-
 export default function LikelihoodExplorer() {
-  // --- Parameters ---
+  // --- Params ---
   const [q, setQ] = useState<number[]>([7, 5, 5, 5]);
   const [x, setX] = useState<number[]>([3, 2, 2, 1]);
   const [wSelf, setWSelf] = useState<number[]>([0.6, 0.2, 0.1, 0.1]);
@@ -138,21 +116,18 @@ export default function LikelihoodExplorer() {
   const [tau2, setTau2] = useState<number>(0.7);
   const [sadBand, setSadBand] = useState<number>(0.02);
   const [thetaStep, setThetaStep] = useState<number>(1);
-  // 任意: 各論点のポイント（Your/Opponent）
-  const [selfPts] = useState<number[]>([2, 1, 0, -1]);
-  const [oppPts] = useState<number[]>([2, 0, -1, 1]);
 
   const wSelfClamped = useMemo(() => clampWeights(wSelf, wMax), [wSelf, wMax]);
   const wOtherClamped = useMemo(() => clampWeights(wOther, wMax), [wOther, wMax]);
   const candX = useMemo(() => enumerateCandX(q.map((v) => Math.round(v))), [q]);
 
-  // --- 尤度（other の感情）を θ で走査
+  // --- θ 走査: other の感情尤度 ---
   const data = useMemo(() => {
     const rows: Array<{ [k: string]: number }> = [];
     for (let th = -90; th <= 90; th += thetaStep) {
       const S = satisfaction(deg2rad(th), wSelfClamped, wOtherClamped, x, q, beta, candX);
       const emoScores = emotionScoresFromS(S, tau1, tau2, sadBand);
-      const emoProbs = scoresToProbs(emoScores); // ← 正規化して確率
+      const emoProbs = scoresToProbs(emoScores);
       rows.push({ theta: th, ...emoProbs });
     }
     return rows;
@@ -171,17 +146,17 @@ export default function LikelihoodExplorer() {
     setThetaStep(1);
   };
 
-  // 合計ポイント（表の下段に表示）
-  const totalSelf = x.reduce((s, xi, i) => s + xi * selfPts[i], 0);
-  const totalOpp = x.reduce((s, xi, i) => s + (q[i] - xi) * oppPts[i], 0);
+  // --- 合計ポイントは重み × 個数に基づく（要望どおり） ---
+  const totalSelf = x.reduce((s, xi, i) => s + xi * wSelfClamped[i], 0);
+  const totalOpp = x.reduce((s, xi, i) => s + (q[i] - xi) * wOtherClamped[i], 0);
 
   return (
     <div className="p-6 grid gap-6 xl:grid-cols-2">
       <motion.h1 initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} className="text-2xl font-semibold">
-        Emotion Likelihood Explorer (other emotion likelihood)
+        Emotion Likelihood Explorer (other's emotion likelihood)
       </motion.h1>
 
-      {/* --- グラフ（other の感情尤度） --- */}
+      {/* --- グラフ --- */}
       <Card className="xl:row-span-2 shadow-md">
         <CardContent className="pt-6">
           <div className="h-[420px]">
@@ -211,31 +186,52 @@ export default function LikelihoodExplorer() {
             <h2 className="text-lg font-medium">Model params</h2>
             <Button variant="outline" onClick={reset}>Reset</Button>
           </div>
-          <SliderField label="β (inverse temperature)" value={beta} min={0} max={4} step={0.01} onChange={([v]) => setBeta(v)} />
-          <SliderField label="τ1 (Anger↔Neutral boundary)" value={tau1} min={0.05} max={0.9} step={0.005} onChange={([v]) => setTau1(v)} />
-          <SliderField label="τ2 (Neutral↔Joy boundary)" value={tau2} min={0.1} max={0.98} step={0.005} onChange={([v]) => setTau2(v)} />
-          <SliderField label="sad_band (Sad spike width)" value={sadBand} min={0.005} max={0.1} step={0.001} onChange={([v]) => setSadBand(v)} />
-          <SliderField label="θ grid step (deg)" value={thetaStep} min={1} max={10} step={1} onChange={([v]) => setThetaStep(v)} />
+          <div className="grid gap-3">
+            <div className="flex items-center gap-3">
+              <Label className="w-40 text-sm text-muted-foreground">β (inverse temperature)</Label>
+              <Slider value={[beta]} min={0} max={4} step={0.01} onValueChange={([v]) => setBeta(v)} className="flex-1" />
+              <span className="text-xs tabular-nums w-12 text-right">{beta.toFixed(2)}</span>
+            </div>
+            <div className="flex items-center gap-3">
+              <Label className="w-40 text-sm text-muted-foreground">τ1 (Anger↔Neutral)</Label>
+              <Slider value={[tau1]} min={0.05} max={0.9} step={0.005} onValueChange={([v]) => setTau1(v)} className="flex-1" />
+              <span className="text-xs tabular-nums w-12 text-right">{tau1.toFixed(3)}</span>
+            </div>
+            <div className="flex items-center gap-3">
+              <Label className="w-40 text-sm text-muted-foreground">τ2 (Neutral↔Joy)</Label>
+              <Slider value={[tau2]} min={0.1} max={0.98} step={0.005} onValueChange={([v]) => setTau2(v)} className="flex-1" />
+              <span className="text-xs tabular-nums w-12 text-right">{tau2.toFixed(3)}</span>
+            </div>
+            <div className="flex items-center gap-3">
+              <Label className="w-40 text-sm text-muted-foreground">sad_band</Label>
+              <Slider value={[sadBand]} min={0.005} max={0.1} step={0.001} onValueChange={([v]) => setSadBand(v)} className="flex-1" />
+              <span className="text-xs tabular-nums w-12 text-right">{sadBand.toFixed(3)}</span>
+            </div>
+            <div className="flex items-center gap-3">
+              <Label className="w-40 text-sm text-muted-foreground">θ grid step (deg)</Label>
+              <Slider value={[thetaStep]} min={1} max={10} step={1} onValueChange={([v]) => setThetaStep(v)} className="flex-1" />
+              <span className="text-xs tabular-nums w-12 text-right">{thetaStep.toFixed(0)}</span>
+            </div>
+          </div>
         </CardContent>
       </Card>
 
-      {/* --- 配分スライダー（Your: x / Opponent: q−x を明示） --- */}
+      {/* --- 配分スライダー & ポイント（w×個数） --- */}
       <Card className="shadow-md">
         <CardContent className="pt-6 space-y-6">
-          <h2 className="text-lg font-medium">Division (x is self share, q − x is other share)</h2>
+          <h2 className="text-lg font-medium">Division (x is self's share, q − x is other's share)</h2>
 
           <div className="grid grid-cols-12 gap-2 text-sm font-medium">
             <div className="col-span-3">Your Item</div>
-            <div className="col-span-2">Your Point</div>
+            <div className="col-span-3">Your Point = q_i × w_self,i</div>
             <div className="col-span-3">Division (x_i / q_i)</div>
-            <div className="col-span-2">Opponent Point</div>
-            <div className="col-span-2">Opponent Item</div>
+            <div className="col-span-3">Opponent Point = q_i × w_other,i</div>
           </div>
 
           {[0,1,2,3].map((i) => (
             <div key={i} className="grid grid-cols-12 items-center gap-2 text-sm">
               <div className="col-span-3">Item {i+1}</div>
-              <div className="col-span-2">{q[i]} × {selfPts[i]} pt</div>
+              <div className="col-span-3">{q[i]} × {wSelfClamped[i].toFixed(1)} pt</div>
               <div className="col-span-3">
                 <Slider value={[x[i]]} min={0} max={q[i]} step={1} onValueChange={([v]) => {
                   const next = [...x];
@@ -243,24 +239,22 @@ export default function LikelihoodExplorer() {
                   setX(next);
                 }} />
               </div>
-              <div className="col-span-2">{(q[i]-x[i])} × {oppPts[i]} pt</div>
-              <div className="col-span-2">—</div>
+              <div className="col-span-3">{q[i]} × {wOtherClamped[i].toFixed(1)} pt</div>
             </div>
           ))}
 
           <div className="grid grid-cols-12 gap-2 text-sm font-semibold pt-2 border-t">
             <div className="col-span-3">Total Point</div>
-            <div className="col-span-2 text-blue-600">{totalSelf}</div>
+            <div className="col-span-3 text-blue-600">self: {totalSelf.toFixed(1)}</div>
             <div className="col-span-3" />
-            <div className="col-span-2 text-blue-600">{totalOpp}</div>
-            <div className="col-span-2" />
+            <div className="col-span-3 text-blue-600">other: {totalOpp.toFixed(1)}</div>
           </div>
         </CardContent>
       </Card>
 
-      {/* --- 重み（0.1刻み、符号付き、|w_i| ≤ w_max） --- */}
+      {/* --- 重みスライダー（0.1刻み） --- */}
       <Card className="xl:col-span-2 shadow-md">
-        <CardContent className="pt-6 space-y-5">
+        <CardContent className="pt-6 space-y-6">
           <h2 className="text-lg font-medium">Issue weights (signed; |w_i| ≤ w_max)</h2>
 
           <div className="flex items-center gap-3">
@@ -297,17 +291,6 @@ export default function LikelihoodExplorer() {
               <p className="text-xs text-muted-foreground">clamped: [{wOtherClamped.map((v) => v.toFixed(1)).join(", ")}]</p>
             </div>
           </div>
-        </CardContent>
-      </Card>
-
-      <Card className="xl:col-span-2 shadow-sm">
-        <CardContent className="pt-5 text-sm text-muted-foreground space-y-2">
-          <p>Notes:</p>
-          <ul className="list-disc pl-5 space-y-1">
-            <li>x は self の取り分、q − x は other の取り分です（表ヘッダにも明記）。</li>
-            <li>グラフは <strong>other の感情尤度</strong> (P_other(E | θ, x, w_self, w_other)) を描画しています。</li>
-            <li>各 w は 0.1 ステップで操作でき、描画時に [−w_max, w_max] にクリップされます。</li>
-          </ul>
         </CardContent>
       </Card>
     </div>
