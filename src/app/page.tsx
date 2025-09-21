@@ -6,18 +6,28 @@ import { Slider } from "@/components/ui/slider";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
-import { LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, ReferenceLine } from "recharts";
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+  ReferenceLine,
+  ScatterChart,
+  Scatter,
+  CartesianGrid,
+} from "recharts";
 import { motion } from "framer-motion";
 
 /*
-  Emotion Likelihood Explorer (division slider classic + q editor)
-  ---------------------------------------------------------------
-  - 配分 (x_i) は 0..q_i の 1 刻みスライダー（テーブル形式へ“戻す”）
-  - 列: Your Item / Your Point = q_i × w_self,i / Division (x_i / q_i) / Opponent Point = q_i × w_other,i
-  - 合計ポイント: self = Σ x_i w_self,i, other = Σ (q_i − x_i) w_other,i
-  - q を直接編集できる UI を追加（各イシューごとに整数入力）
-  - グラフは other の感情尤度 P_other(E | θ, x, w_self, w_other)
-  - 効用: U^other = cosθ <w_other, q−x> + sinθ <w_self, x>
+  Emotion Likelihood Explorer (self/other, probability-normalized)
+  ----------------------------------------------------------------
+  - 役割分離: U^other(x) = cosθ <w_other, q − x> + sinθ <w_self, x>
+  - 感情スコア g_k(S) を正規化して確率: P_k = (g_k + ε) / Σ(g_j + ε)
+  - θスキャンのラインチャートに加え、θ固定で全候補xを散布図に分類（色は表出感情）
+  - Division テーブル（x_i スライダー）と q エディタはそのまま
 */
 
 const deg2rad = (d: number) => (Math.PI / 180) * d;
@@ -55,7 +65,7 @@ function utility(thetaRad: number, wSelf: number[], wOther: number[], x: number[
   return Math.cos(thetaRad) * dot(wOther, xOther) + Math.sin(thetaRad) * dot(wSelf, x);
 }
 
-// 満足度
+// 満足度 S = exp(β (U − Umax))
 function satisfaction(
   thetaRad: number,
   wSelf: number[],
@@ -71,6 +81,7 @@ function satisfaction(
   return Math.exp(beta * (u - umax));
 }
 
+// 区分線形スコア（未正規化）
 function emotionScoresFromS(S: number, tau1: number, tau2: number, sadBand: number) {
   const clamp01 = (v: number) => clamp(v, 0, 1);
   const anger = clamp01((tau1 - S) / tau1);
@@ -85,6 +96,7 @@ function emotionScoresFromS(S: number, tau1: number, tau2: number, sadBand: numb
   return { Anger: anger, Sad: sad, Neutral: neutral, Joy: joy };
 }
 
+// スコア → 確率正規化
 function scoresToProbs(scores: { [k: string]: number }, eps = 1e-9) {
   const total = (scores.Anger + eps) + (scores.Sad + eps) + (scores.Neutral + eps) + (scores.Joy + eps);
   return {
@@ -102,7 +114,7 @@ const EMO_COLORS: Record<string, string> = {
   Joy: "#2ca02c",
 };
 
-function SliderField({ label, value, onChange, min = 0, max = 1, step = 0.01, }: { label: string; value: number; onChange: (v: number[]) => void; min?: number; max?: number; step?: number; }) {
+function SliderField({ label, value, onChange, min = 0, max = 1, step = 0.01 }: { label: string; value: number; onChange: (v: number[]) => void; min?: number; max?: number; step?: number; }) {
   return (
     <div className="space-y-2">
       <div className="flex justify-between">
@@ -125,21 +137,47 @@ export default function LikelihoodExplorer() {
   const [tau2, setTau2] = useState<number>(0.7);
   const [sadBand, setSadBand] = useState<number>(0.02);
   const [thetaStep, setThetaStep] = useState<number>(1);
+  const [thetaDeg, setThetaDeg] = useState<number>(45);
 
   const wSelfClamped = useMemo(() => clampWeights(wSelf, wMax), [wSelf, wMax]);
   const wOtherClamped = useMemo(() => clampWeights(wOther, wMax), [wOther, wMax]);
   const candX = useMemo(() => enumerateCandX(q.map((v) => Math.round(v))), [q]);
 
-  const data = useMemo(() => {
+  // θ→感情尤度ライン
+  const lineData = useMemo(() => {
     const rows: Array<{ [k: string]: number }> = [];
     for (let th = -90; th <= 90; th += thetaStep) {
       const S = satisfaction(deg2rad(th), wSelfClamped, wOtherClamped, x, q, beta, candX);
-      const emoScores = emotionScoresFromS(S, tau1, tau2, sadBand);
-      const emoProbs = scoresToProbs(emoScores);
-      rows.push({ theta: th, ...emoProbs });
+      const probs = scoresToProbs(emotionScoresFromS(S, tau1, tau2, sadBand));
+      rows.push({ theta: th, ...probs });
     }
     return rows;
   }, [wSelfClamped, wOtherClamped, x, q, beta, tau1, tau2, sadBand, thetaStep, candX]);
+
+  // 散布図（θ固定で全候補xを分類）
+  const scatterGroups = useMemo(() => {
+    const groups: Record<string, Array<{ sx: number; oy: number }>> = { Joy: [], Neutral: [], Sad: [], Anger: [] };
+    const thetaRad = deg2rad(thetaDeg);
+    let umax = -Infinity;
+    for (const xx of candX) {
+      const u = utility(thetaRad, wSelfClamped, wOtherClamped, xx, q);
+      if (u > umax) umax = u;
+    }
+    for (const xx of candX) {
+      const u = utility(thetaRad, wSelfClamped, wOtherClamped, xx, q);
+      const S = Math.exp(beta * (u - umax));
+      const probs = scoresToProbs(emotionScoresFromS(S, tau1, tau2, sadBand));
+      let best: keyof typeof probs = "Joy";
+      let bestVal = probs[best];
+      (Object.keys(probs) as Array<keyof typeof probs>).forEach((k) => {
+        if (probs[k] > bestVal) { best = k; bestVal = probs[k]; }
+      });
+      const sx = dot(wSelfClamped, xx);
+      const oy = dot(wOtherClamped, add(q, xx, -1));
+      groups[best].push({ sx, oy });
+    }
+    return groups;
+  }, [thetaDeg, wSelfClamped, wOtherClamped, q, candX, beta, tau1, tau2, sadBand]);
 
   const reset = () => {
     setQ([7, 5, 5, 5]);
@@ -152,28 +190,25 @@ export default function LikelihoodExplorer() {
     setTau2(0.7);
     setSadBand(0.02);
     setThetaStep(1);
+    setThetaDeg(45);
   };
-
-  // 表示用: 各列の値
-  const qSelfVals = q.map((qi, i) => qi * wSelfClamped[i]);
-  const qOtherVals = q.map((qi, i) => qi * wOtherClamped[i]);
 
   // 合計ポイント: self = Σ x_i w_self,i, other = Σ (q_i − x_i) w_other,i
   const totalSelf = x.reduce((s, xi, i) => s + xi * wSelfClamped[i], 0);
   const totalOther = x.reduce((s, xi, i) => s + (q[i] - xi) * wOtherClamped[i], 0);
 
   return (
-    <div className="p-6 grid gap-6 lg:grid-cols-2">
+    <div className="p-6 grid gap-6 xl:grid-cols-2">
       <motion.h1 initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} className="text-2xl font-semibold">
         Emotion Likelihood Explorer (self/other)
       </motion.h1>
 
-      {/* 感情尤度グラフ */}
-      <Card className="lg:row-span-2 shadow-md">
+      {/* ラインチャート（θ→感情尤度） */}
+      <Card className="shadow-md">
         <CardContent className="pt-6">
-          <div className="h-[420px]">
+          <div className="h-[320px]">
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={data} margin={{ left: 8, right: 8, top: 8, bottom: 8 }}>
+              <LineChart data={lineData} margin={{ left: 8, right: 8, top: 8, bottom: 8 }}>
                 <XAxis dataKey="theta" type="number" domain={[-90, 90]} tickCount={13}
                   label={{ value: "θ (deg)", position: "insideBottom", dy: 10 }} />
                 <YAxis domain={[0, 1]} tickCount={6}
@@ -191,11 +226,46 @@ export default function LikelihoodExplorer() {
         </CardContent>
       </Card>
 
-      {/* q 編集 + Division（スライダー） */}
+      {/* 散布図（θ固定の全候補x） */}
       <Card className="shadow-md">
+        <CardContent className="pt-6">
+          <div className="h-[320px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <ScatterChart margin={{ left: 8, right: 8, top: 8, bottom: 8 }}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis type="number" dataKey="sx" domain={["auto", "auto"]}
+                  label={{ value: "Σ x_i w_self,i", position: "insideBottom", dy: 10 }} />
+                <YAxis type="number" dataKey="oy" domain={["auto", "auto"]}
+                  label={{ value: "Σ (q_i − x_i) w_other,i", angle: -90, position: "insideLeft" }} />
+                <Legend />
+                <Tooltip formatter={(v: number) => (typeof v === "number" ? v.toFixed(2) : String(v))} />
+                <Scatter name="Joy" data={scatterGroups.Joy} fill={EMO_COLORS.Joy} />
+                <Scatter name="Neutral" data={scatterGroups.Neutral} fill={EMO_COLORS.Neutral} />
+                <Scatter name="Sad" data={scatterGroups.Sad} fill={EMO_COLORS.Sad} />
+                <Scatter name="Anger" data={scatterGroups.Anger} fill={EMO_COLORS.Anger} />
+              </ScatterChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="mt-2 text-sm">θ = {thetaDeg}° 固定での全候補 x の感情分類</div>
+        </CardContent>
+      </Card>
+
+      {/* θ 調整 */}
+      <Card className="shadow-md">
+        <CardContent className="pt-6 space-y-4">
+          <div className="flex items-center gap-3">
+            <Label className="w-28 text-sm">θ (deg)</Label>
+            <Slider value={[thetaDeg]} min={-90} max={90} step={1} onValueChange={([v]) => setThetaDeg(v)} className="flex-1" />
+            <span className="text-sm tabular-nums w-10 text-right">{thetaDeg}</span>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* q 編集 + Division（スライダー） */}
+      <Card className="shadow-md xl:col-span-2">
         <CardContent className="pt-6 space-y-6">
           <div className="flex items-center justify-between">
-            <h2 className="text-lg font-medium">Division (x is self share, q − x is other share)</h2>
+            <h2 className="text-lg font-medium">Division (x is self's share, q − x is other's share)</h2>
             <Button variant="outline" onClick={reset}>Reset</Button>
           </div>
 
@@ -207,7 +277,7 @@ export default function LikelihoodExplorer() {
                 <Input key={i} type="number" min={0} step={1} value={qi} onChange={(e) => {
                   const v = Math.max(0, Math.round(parseFloat(e.target.value)) || 0);
                   const next = [...q];
-                  // x_i を超えないようにクランプ
+                  // x_i が q_i を超えないように同期
                   if (x[i] > v) {
                     const nx = [...x];
                     nx[i] = v;
@@ -254,8 +324,8 @@ export default function LikelihoodExplorer() {
         </CardContent>
       </Card>
 
-      {/* 重み編集（必要なら） */}
-      <Card className="lg:col-span-2 shadow-md">
+      {/* 重み編集 */}
+      <Card className="shadow-md xl:col-span-2">
         <CardContent className="pt-6 space-y-4">
           <h2 className="text-lg font-medium">Issue weights (signed; |w_i| ≤ w_max)</h2>
           <div className="flex items-center gap-3">
