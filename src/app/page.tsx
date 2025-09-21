@@ -22,11 +22,15 @@ import {
 import { motion } from "framer-motion";
 
 /*
-  Emotion Belt Scatter Explorer
-  ---------------------------------------------
-  - w は ±w_max の範囲で 1 刻み（従来どおり）
-  - Division UI を「x と q−x の配分スライダー（x_i / q_i）」に刷新
-  - トータル表示: self = Σ x_i w_self,i, other = Σ (q_i − x_i) w_other,i
+  Emotion Belt Scatter Explorer (self/other, probability-normalized)
+  -----------------------------------------------------------------
+  要件:
+  - w は 1 刻みで調整（±w_max の範囲、符号付き）
+  - 横軸 = Σ_i x_i * w_self,i（self の価値）
+  - 縦軸 = Σ_i (q_i − x_i) * w_other,i（other の価値）
+  - θ を固定して、全候補 x の組み合わせを点でプロット
+  - 各点の色は other の表出感情（満足度 S に基づく g_k を正規化 → argmax）
+  - 上部には従来の θ→感情尤度のラインチャートも残して比較可能に
 */
 
 const deg2rad = (d: number) => (Math.PI / 180) * d;
@@ -55,7 +59,7 @@ function clamp(v: number, lo: number, hi: number) {
 }
 
 function clampWeights(w: number[], wmax: number) {
-  return w.map((wi) => Math.round(clamp(wi, -wmax, wmax))); // ← 1刻みのまま
+  return w.map((wi) => Math.round(clamp(wi, -wmax, wmax))); // ← 1刻み想定
 }
 
 // 効用（other 視点; self/other 役割分離）
@@ -65,7 +69,11 @@ function utility(thetaRad: number, wSelf: number[], wOther: number[], x: number[
 }
 
 // 満足度 S = exp(β (U − Umax))
-function satisfactionGivenUmax(u: number, umax: number, beta: number) {
+function satisfactionGivenUmax(
+  u: number,
+  umax: number,
+  beta: number,
+) {
   return Math.exp(beta * (u - umax));
 }
 
@@ -94,119 +102,29 @@ function scoresToProbs(scores: { [k: string]: number }, eps = 1e-9) {
 }
 
 const EMO_COLORS: Record<string, string> = {
-  Anger: "#f28e8e",
-  Sad: "#7d7aa6",
-  Neutral: "#bfecc5",
-  Joy: "#f5c04a",
+  Anger: "#f28e8e",   // pinkish red
+  Sad: "#7d7aa6",     // muted purple
+  Neutral: "#bfecc5", // pale green
+  Joy: "#f5c04a",     // warm yellow
 };
 
+// ラベル順序
 const EMO_ORDER = ["Joy", "Neutral", "Sad", "Anger"] as const;
 
-/* ---------------- UI helpers ---------------- */
-
-function WeightSliderRow({
-  label,
-  values,
-  setValues,
-  wMax,
-}: {
-  label: string;
-  values: number[];
-  setValues: (v: number[]) => void;
-  wMax: number;
-}) {
+function WeightSliderRow({ label, values, setValues, wMax }: { label: string; values: number[]; setValues: (v: number[]) => void; wMax: number; }) {
   return (
     <div className="space-y-2">
       <Label className="text-sm">{label} (step=1)</Label>
       <div className="grid grid-cols-4 gap-2">
         {values.map((wi, i) => (
-          <Slider
-            key={i}
-            value={[wi]}
-            min={-wMax}
-            max={wMax}
-            step={1} // ← 1刻みキープ
-            onValueChange={([v]) => {
-              const next = [...values];
-              next[i] = Math.round(v);
-              setValues(next);
-            }}
-          />
+          <Slider key={i} value={[wi]} min={-wMax} max={wMax} step={1} onValueChange={([v]) => {
+            const next = [...values];
+            next[i] = Math.round(v);
+            setValues(next);
+          }} />
         ))}
       </div>
-      <p className="text-xs text-muted-foreground">
-        current: [{values.map((v) => v.toFixed(0)).join(", ")}]
-      </p>
-    </div>
-  );
-}
-
-/** Division（x と q−x の配分）行 */
-function DivisionRow({
-  idx,
-  q,
-  x,
-  setX,
-  wSelf,
-  wOther,
-}: {
-  idx: number;
-  q: number[];
-  x: number[];
-  setX: (v: number[]) => void;
-  wSelf: number[];
-  wOther: number[];
-}) {
-  const qi = Math.max(0, Math.round(q[idx] || 0));
-  const xi = Math.max(0, Math.min(qi, Math.round(x[idx] || 0)));
-  const ratio = qi > 0 ? xi / qi : 0; // x_i / q_i
-  const step = qi > 0 ? 1 / qi : 1; // 1個ずつ増減
-  const yourFull = qi * wSelf[idx]; // q_i × w_self,i（フルで取った場合の基準pt）
-  const oppFull = qi * wOther[idx]; // q_i × w_other,i
-
-  const fmt = (n: number) => (Number.isInteger(n) ? n.toString() : n.toFixed(2));
-
-  return (
-    <div className="grid grid-cols-[100px,1fr,280px,1fr] items-center py-2">
-      {/* Your Item */}
-      <div className="text-sm text-muted-foreground">Item {idx + 1}</div>
-
-      {/* Your Point */}
-      <div className="text-sm">
-        <span className="tabular-nums">{fmt(qi)}</span>
-        <span> × </span>
-        <span className="tabular-nums">{fmt(wSelf[idx])}</span>
-        <span> pt</span>
-      </div>
-
-      {/* Division slider (x_i / q_i) */}
-      <div className="flex items-center gap-3">
-        <Slider
-          value={[ratio]}
-          min={0}
-          max={1}
-          step={step}
-          onValueChange={([r]) => {
-            const next = [...x];
-            // x_i は 1 個刻みで更新（丸め＆クランプ）
-            const xiNext = Math.max(0, Math.min(qi, Math.round((r ?? 0) * qi)));
-            next[idx] = xiNext;
-            setX(next);
-          }}
-          className="flex-1"
-        />
-        <span className="text-xs tabular-nums w-12 text-right">
-          {qi > 0 ? `${xi}/${qi}` : "-"}
-        </span>
-      </div>
-
-      {/* Opponent Point */}
-      <div className="text-sm text-right md:text-left">
-        <span className="tabular-nums">{fmt(qi)}</span>
-        <span> × </span>
-        <span className="tabular-nums">{fmt(wOther[idx])}</span>
-        <span> pt</span>
-      </div>
+      <p className="text-xs text-muted-foreground">current: [{values.map((v) => v.toFixed(0)).join(", ")}]</p>
     </div>
   );
 }
@@ -235,12 +153,14 @@ export default function EmotionBeltScatterExplorer() {
   const lineData = useMemo(() => {
     const rows: Array<{ [k: string]: number }> = [];
     for (let th = -90; th <= 90; th += thetaStep) {
+      // Umax を一度だけ計算
       const thetaRad = deg2rad(th);
       let umax = -Infinity;
       for (const xx of candX) {
         const u = utility(thetaRad, wSelfClamped, wOtherClamped, xx, q);
         if (u > umax) umax = u;
       }
+      // 提案 x の満足度
       const u = utility(thetaRad, wSelfClamped, wOtherClamped, x, q);
       const S = satisfactionGivenUmax(u, umax, beta);
       const probs = scoresToProbs(emotionScoresFromS(S, tau1, tau2, sadBand));
@@ -252,30 +172,27 @@ export default function EmotionBeltScatterExplorer() {
   // ---- スキャッター: 全候補 x の (selfValue, otherValue) と感情分類 ----
   const scatterGroups = useMemo(() => {
     const groups: Record<string, Array<{ sx: number; oy: number }>> = {
-      Joy: [],
-      Neutral: [],
-      Sad: [],
-      Anger: [],
+      Joy: [], Neutral: [], Sad: [], Anger: []
     };
 
     const thetaRad = deg2rad(thetaDeg);
     let umax = -Infinity;
+    // 先に Umax
     for (const xx of candX) {
       const u = utility(thetaRad, wSelfClamped, wOtherClamped, xx, q);
       if (u > umax) umax = u;
     }
 
+    // 各候補を分類
     for (const xx of candX) {
       const u = utility(thetaRad, wSelfClamped, wOtherClamped, xx, q);
       const S = satisfactionGivenUmax(u, umax, beta);
       const probs = scoresToProbs(emotionScoresFromS(S, tau1, tau2, sadBand));
+      // argmax
       let best = "Joy" as keyof typeof probs;
       let bestVal = probs[best];
       (Object.keys(probs) as Array<keyof typeof probs>).forEach((k) => {
-        if (probs[k] > bestVal) {
-          best = k;
-          bestVal = probs[k];
-        }
+        if (probs[k] > bestVal) { best = k; bestVal = probs[k]; }
       });
 
       const selfVal = dot(wSelfClamped, xx);
@@ -291,7 +208,7 @@ export default function EmotionBeltScatterExplorer() {
       scatterGroups.Joy,
       scatterGroups.Neutral,
       scatterGroups.Sad,
-      scatterGroups.Anger
+      scatterGroups.Anger,
     );
     const xs = all.map((d) => d.sx);
     const ys = all.map((d) => d.oy);
@@ -301,13 +218,6 @@ export default function EmotionBeltScatterExplorer() {
     const ymax = Math.max(...ys, 1);
     return { xmin, xmax, ymin, ymax };
   }, [scatterGroups]);
-
-  // 合計ポイント（UI表示）
-  const totalSelf = useMemo(() => dot(wSelfClamped, x), [wSelfClamped, x]);
-  const totalOther = useMemo(
-    () => dot(wOtherClamped, add(q, x, -1)),
-    [wOtherClamped, q, x]
-  );
 
   const reset = () => {
     setQ([7, 5, 5, 5]);
@@ -323,13 +233,13 @@ export default function EmotionBeltScatterExplorer() {
     setThetaStep(1);
   };
 
+  // --- 合計ポイントは重み × 個数に基づく（要望どおり） ---
+  const totalSelf = x.reduce((s, xi, i) => s + xi * wSelfClamped[i], 0);
+  const totalOpp = x.reduce((s, xi, i) => s + (q[i] - xi) * wOtherClamped[i], 0);
+
   return (
     <div className="p-6 grid gap-6 2xl:grid-cols-2">
-      <motion.h1
-        initial={{ opacity: 0, y: -6 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="text-2xl font-semibold"
-      >
+      <motion.h1 initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} className="text-2xl font-semibold">
         Emotion Belt Explorer (scatter region + θ-scan)
       </motion.h1>
 
@@ -339,22 +249,10 @@ export default function EmotionBeltScatterExplorer() {
           <div className="h-[320px]">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={lineData} margin={{ left: 8, right: 8, top: 8, bottom: 8 }}>
-                <XAxis
-                  dataKey="theta"
-                  type="number"
-                  domain={[-90, 90]}
-                  tickCount={13}
-                  label={{ value: "θ (deg)", position: "insideBottom", dy: 10 }}
-                />
-                <YAxis
-                  domain={[0, 1]}
-                  tickCount={6}
-                  label={{
-                    value: "P_other(E | θ, x, w_self, w_other)",
-                    angle: -90,
-                    position: "insideLeft",
-                  }}
-                />
+                <XAxis dataKey="theta" type="number" domain={[-90, 90]} tickCount={13}
+                  label={{ value: "θ (deg)", position: "insideBottom", dy: 10 }} />
+                <YAxis domain={[0, 1]} tickCount={6}
+                  label={{ value: "P_other(E | θ, x, w_self, w_other)", angle: -90, position: "insideLeft" }} />
                 <Tooltip formatter={(v: number) => v.toFixed(3)} />
                 <Legend />
                 <ReferenceLine x={0} strokeDasharray="3 3" />
@@ -368,34 +266,43 @@ export default function EmotionBeltScatterExplorer() {
         </CardContent>
       </Card>
 
-      {/* ---- スキャッター（候補 x の全点） ---- */}
+      {/* --- 配分スライダー & ポイント（w×個数） --- */}
       <Card className="shadow-md">
-        <CardContent className="pt-6">
-          <div className="h-[520px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <ScatterChart margin={{ left: 8, right: 8, top: 8, bottom: 8 }}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis
-                  type="number"
-                  dataKey="sx"
-                  domain={[xyExtent.xmin, xyExtent.xmax]}
-                  label={{ value: "Self value Σ x_i w_self,i", position: "insideBottom", dy: 10 }}
-                />
-                <YAxis
-                  type="number"
-                  dataKey="oy"
-                  domain={[xyExtent.ymin, xyExtent.ymax]}
-                  label={{ value: "Other value Σ (q_i − x_i) w_other,i", angle: -90, position: "insideLeft" }}
-                />
-                <Legend />
-                <Tooltip cursor={{ strokeDasharray: "3 3" }} formatter={(v: number) => v.toFixed(2)} />
-                {EMO_ORDER.map((emo) => (
-                  <Scatter key={emo} name={emo} data={scatterGroups[emo]} fill={EMO_COLORS[emo]} />
-                ))}
-              </ScatterChart>
-            </ResponsiveContainer>
+          <CardContent className="pt-6 space-y-6">
+          <h2 className="text-lg font-medium">Division (x is self's share, q − x is other's share)</h2>
+
+
+          <div className="grid grid-cols-12 gap-2 text-sm font-medium">
+          <div className="col-span-3">Your Item</div>
+          <div className="col-span-3">Your Point = q_i × w_self,i</div>
+          <div className="col-span-3">Division (x_i / q_i)</div>
+          <div className="col-span-3">Opponent Point = q_i × w_other,i</div>
           </div>
-        </CardContent>
+
+
+          {[0,1,2,3].map((i) => (
+          <div key={i} className="grid grid-cols-12 items-center gap-2 text-sm">
+          <div className="col-span-3">Item {i+1}</div>
+          <div className="col-span-3">{q[i]} × {wSelfClamped[i].toFixed(1)} pt</div>
+          <div className="col-span-3">
+          <Slider value={[x[i]]} min={0} max={q[i]} step={1} onValueChange={([v]) => {
+          const next = [...x];
+          next[i] = Math.round(v);
+          setX(next);
+          }} />
+          </div>
+          <div className="col-span-3">{q[i]} × {wOtherClamped[i].toFixed(1)} pt</div>
+          </div>
+          ))}
+
+
+          <div className="grid grid-cols-12 gap-2 text-sm font-semibold pt-2 border-t">
+          <div className="col-span-3">Total Point</div>
+          <div className="col-span-3 text-blue-600">self: {totalSelf.toFixed(1)}</div>
+          <div className="col-span-3" />
+          <div className="col-span-3 text-blue-600">other: {totalOpp.toFixed(1)}</div>
+          </div>
+          </CardContent>
       </Card>
 
       {/* ---- 操作パネル ---- */}
@@ -403,73 +310,29 @@ export default function EmotionBeltScatterExplorer() {
         <CardContent className="pt-6 space-y-6">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-medium">Controls</h2>
-            <Button variant="outline" onClick={reset}>
-              Reset
-            </Button>
+            <Button variant="outline" onClick={reset}>Reset</Button>
           </div>
 
-          {/* Division UI */}
-          <div className="space-y-2">
-            <div className="flex items-end justify-between">
-              <Label className="text-sm text-muted-foreground">
-                Division (x is self share, q − x is other share)
-              </Label>
-              <div className="text-xs text-muted-foreground">
-                スライダーは比率 x_i / q_i を操作（x_i は 1 個刻み）
-              </div>
-            </div>
-
-            {/* ヘッダ行 */}
-            <div className="grid grid-cols-[100px,1fr,280px,1fr] gap-2 text-xs text-muted-foreground">
-              <div>Your Item</div>
-              <div>Your Point = q_i × w_self,i</div>
-              <div className="text-center">Division (x_i / q_i)</div>
-              <div className="text-right md:text-left">Opponent Point = q_i × w_other,i</div>
-            </div>
-
-            <div className="rounded-md border">
-              {[0, 1, 2, 3].map((i) => (
-                <div key={i} className="px-3">
-                  <DivisionRow
-                    idx={i}
-                    q={q}
-                    x={x}
-                    setX={setX}
-                    wSelf={wSelfClamped}
-                    wOther={wOtherClamped}
-                  />
-                  {i < 3 && <div className="h-px bg-border" />}
+          <div className="grid md:grid-cols-2 gap-6">
+            <div className="space-y-4">
+              <Label className="text-sm text-muted-foreground">Division (x: self share, q − x: other share)</Label>
+              {[0,1,2,3].map((i) => (
+                <div key={i} className="flex items-center gap-3">
+                  <span className="w-12 text-xs">x[{i}]</span>
+                  <Slider value={[x[i]]} min={0} max={q[i]} step={1} onValueChange={([v]) => {
+                    const next = [...x];
+                    next[i] = Math.round(v);
+                    setX(next);
+                  }} className="flex-1" />
+                  <span className="w-10 text-xs text-right">{x[i]}</span>
                 </div>
               ))}
             </div>
 
-            {/* 合計ポイント */}
-            <div className="flex items-center justify-between pt-2">
-              <div className="text-sm font-medium">Total Point</div>
-              <div className="text-sm flex gap-6">
-                <span>
-                  self: <span className="font-semibold tabular-nums">{totalSelf.toFixed(2)}</span>
-                </span>
-                <span>
-                  other: <span className="font-semibold tabular-nums">{totalOther.toFixed(2)}</span>
-                </span>
-              </div>
-            </div>
-          </div>
-
-          {/* パラメータ群 */}
-          <div className="grid md:grid-cols-2 gap-6">
             <div className="space-y-3">
               <div className="flex items-center gap-3">
                 <Label className="w-28 text-sm text-muted-foreground">θ (deg)</Label>
-                <Slider
-                  value={[thetaDeg]}
-                  min={-90}
-                  max={90}
-                  step={1}
-                  onValueChange={([v]) => setThetaDeg(Math.round(v))}
-                  className="flex-1"
-                />
+                <Slider value={[thetaDeg]} min={-90} max={90} step={1} onValueChange={([v]) => setThetaDeg(Math.round(v))} className="flex-1" />
                 <span className="text-xs tabular-nums w-10 text-right">{thetaDeg}</span>
               </div>
               <div className="flex items-center gap-3">
@@ -493,32 +356,26 @@ export default function EmotionBeltScatterExplorer() {
                 <span className="text-xs tabular-nums w-10 text-right">{sadBand.toFixed(3)}</span>
               </div>
             </div>
+          </div>
 
+          <div className="grid lg:grid-cols-2 gap-6">
             <div className="space-y-4">
               <div className="flex items-center gap-3">
                 <Label className="w-28 text-sm text-muted-foreground">w_max</Label>
-                <Input
-                  type="number"
-                  step={1}
-                  min={0}
-                  value={wMax}
-                  onChange={(e) => setWMax(Math.max(0, parseInt(e.target.value) || 0))}
-                  className="w-28"
-                />
+                <Input type="number" step={1} min={0} value={wMax} onChange={(e) => setWMax(Math.max(0, parseInt(e.target.value) || 0))} className="w-28" />
               </div>
-              {/* ← w は 1 刻みのまま */}
               <WeightSliderRow label="w_self (proposer)" values={wSelf} setValues={setWSelf} wMax={wMax} />
               <WeightSliderRow label="w_other (emotion expresser)" values={wOther} setValues={setWOther} wMax={wMax} />
             </div>
-          </div>
 
-          <div className="space-y-2 text-sm text-muted-foreground">
-            <p>Notes:</p>
-            <ul className="list-disc pl-5 space-y-1">
-              <li>左列と右列の「q_i × w」はフル配分時の基準ポイントです。実際の合計はスライダー比率に応じて self=Σx_iw_self,i、other=Σ(q_i−x_i)w_other,i になります。</li>
-              <li>w のスライダーは従来どおり 1 刻みです。</li>
-              <li>q を大きくすると候補点が指数的に増えます（現在 4 次元）。</li>
-            </ul>
+            <div className="space-y-2 text-sm text-muted-foreground">
+              <p>Notes:</p>
+              <ul className="list-disc pl-5 space-y-1">
+                <li>横軸 = 自分の価値 Σ x_i w_self,i、縦軸 = 相手の価値 Σ (q_i − x_i) w_other,i。</li>
+                <li>各点は候補 x の組（整数格子）。色は other の表出感情（Joy/Neutral/Sad/Anger）。</li>
+                <li>q を大きくすると点の数が指数的に増えるので注意（現在 4 次元）。</li>
+              </ul>
+            </div>
           </div>
         </CardContent>
       </Card>
