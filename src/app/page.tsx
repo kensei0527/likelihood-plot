@@ -219,7 +219,7 @@ export default function LikelihoodExplorer() {
       {/* --- 配分スライダー & ポイント（w×個数） --- */}
       <Card className="shadow-md">
         <CardContent className="pt-6 space-y-6">
-          <h2 className="text-lg font-medium">Division (x is self's share, q − x is other's share)</h2>
+          <h2 className="text-lg font-medium">Division (x is self share, q − x is other share)</h2>
 
           <div className="grid grid-cols-12 gap-2 text-sm font-medium">
             <div className="col-span-3">Your Item</div>
