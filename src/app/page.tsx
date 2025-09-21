@@ -146,6 +146,15 @@ export default function EmotionBeltScatterExplorer() {
   // クリップ（±w_max、1刻み）
   const wSelfClamped = useMemo(() => clampWeights(wSelf, wMax), [wSelf, wMax]);
   const wOtherClamped = useMemo(() => clampWeights(wOther, wMax), [wOther, wMax]);
+  
+  // Total points calculation
+  const totalSelf = useMemo(() => {
+    return x.reduce((sum, xi, i) => sum + xi * wSelfClamped[i], 0);
+  }, [x, wSelfClamped]);
+  
+  const totalOther = useMemo(() => {
+    return q.reduce((sum, qi, i) => sum + (qi - x[i]) * wOtherClamped[i], 0);
+  }, [q, x, wOtherClamped]);
 
   const candX = useMemo(() => enumerateCandX(q.map((v) => Math.round(v))), [q]);
 
@@ -233,10 +242,6 @@ export default function EmotionBeltScatterExplorer() {
     setThetaStep(1);
   };
 
-  // --- 合計ポイントは重み × 個数に基づく（要望どおり） ---
-  const totalSelf = x.reduce((s, xi, i) => s + xi * wSelfClamped[i], 0);
-  const totalOpp = x.reduce((s, xi, i) => s + (q[i] - xi) * wOtherClamped[i], 0);
-
   return (
     <div className="p-6 grid gap-6 2xl:grid-cols-2">
       <motion.h1 initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} className="text-2xl font-semibold">
@@ -266,43 +271,26 @@ export default function EmotionBeltScatterExplorer() {
         </CardContent>
       </Card>
 
-      {/* --- 配分スライダー & ポイント（w×個数） --- */}
+      {/* ---- スキャッター（候補 x の全点） ---- */}
       <Card className="shadow-md">
-          <CardContent className="pt-6 space-y-6">
-          <h2 className="text-lg font-medium">Division (x is self share, q − x is other share)</h2>
-
-
-          <div className="grid grid-cols-12 gap-2 text-sm font-medium">
-          <div className="col-span-3">Your Item</div>
-          <div className="col-span-3">Your Point = q_i × w_self,i</div>
-          <div className="col-span-3">Division (x_i / q_i)</div>
-          <div className="col-span-3">Opponent Point = q_i × w_other,i</div>
+        <CardContent className="pt-6">
+          <div className="h-[520px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <ScatterChart margin={{ left: 8, right: 8, top: 8, bottom: 8 }}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis type="number" dataKey="sx" domain={[xyExtent.xmin, xyExtent.xmax]}
+                  label={{ value: "Self value Σ x_i w_self,i", position: "insideBottom", dy: 10 }} />
+                <YAxis type="number" dataKey="oy" domain={[xyExtent.ymin, xyExtent.ymax]}
+                  label={{ value: "Other value Σ (q_i − x_i) w_other,i", angle: -90, position: "insideLeft" }} />
+                <Legend />
+                <Tooltip cursor={{ strokeDasharray: "3 3" }} formatter={(v: number, n: string) => v.toFixed(2)} />
+                {EMO_ORDER.map((emo) => (
+                  <Scatter key={emo} name={emo} data={scatterGroups[emo]} fill={EMO_COLORS[emo]} />
+                ))}
+              </ScatterChart>
+            </ResponsiveContainer>
           </div>
-
-
-          {[0,1,2,3].map((i) => (
-          <div key={i} className="grid grid-cols-12 items-center gap-2 text-sm">
-          <div className="col-span-3">Item {i+1}</div>
-          <div className="col-span-3">{q[i]} × {wSelfClamped[i].toFixed(1)} pt</div>
-          <div className="col-span-3">
-          <Slider value={[x[i]]} min={0} max={q[i]} step={1} onValueChange={([v]) => {
-          const next = [...x];
-          next[i] = Math.round(v);
-          setX(next);
-          }} />
-          </div>
-          <div className="col-span-3">{q[i]} × {wOtherClamped[i].toFixed(1)} pt</div>
-          </div>
-          ))}
-
-
-          <div className="grid grid-cols-12 gap-2 text-sm font-semibold pt-2 border-t">
-          <div className="col-span-3">Total Point</div>
-          <div className="col-span-3 text-blue-600">self: {totalSelf.toFixed(1)}</div>
-          <div className="col-span-3" />
-          <div className="col-span-3 text-blue-600">other: {totalOpp.toFixed(1)}</div>
-          </div>
-          </CardContent>
+        </CardContent>
       </Card>
 
       {/* ---- 操作パネル ---- */}
@@ -313,22 +301,47 @@ export default function EmotionBeltScatterExplorer() {
             <Button variant="outline" onClick={reset}>Reset</Button>
           </div>
 
-          <div className="grid md:grid-cols-2 gap-6">
-            <div className="space-y-4">
-              <Label className="text-sm text-muted-foreground">Division (x: self share, q − x: other share)</Label>
+          {/* --- 配分スライダー & ポイント（w×個数） --- */}
+          <Card className="shadow-md">
+            <CardContent className="pt-6 space-y-6">
+              <h2 className="text-lg font-medium">Division (x is self's share, q − x is other's share)</h2>
+              <div className="grid grid-cols-12 gap-2 text-sm font-medium">
+                <div className="col-span-3">Your Item</div>
+                <div className="col-span-3">Your Point = x_i × w_self,i</div>
+                <div className="col-span-3">Division (x_i / q_i)</div>
+                <div className="col-span-3">Opponent Point = (q_i - x_i) × w_other,i</div>
+              </div>
               {[0,1,2,3].map((i) => (
-                <div key={i} className="flex items-center gap-3">
-                  <span className="w-12 text-xs">x[{i}]</span>
-                  <Slider value={[x[i]]} min={0} max={q[i]} step={1} onValueChange={([v]) => {
-                    const next = [...x];
-                    next[i] = Math.round(v);
-                    setX(next);
-                  }} className="flex-1" />
-                  <span className="w-10 text-xs text-right">{x[i]}</span>
+                <div key={i} className="grid grid-cols-12 items-center gap-2 text-sm">
+                  <div className="col-span-3">Item {i+1}</div>
+                  <div className="col-span-3">{x[i]} × {wSelfClamped[i].toFixed(0)} = {(x[i] * wSelfClamped[i]).toFixed(0)} pt</div>
+                  <div className="col-span-3">
+                    <Slider 
+                      value={[x[i]]} 
+                      min={0} 
+                      max={q[i]} 
+                      step={1} 
+                      onValueChange={([v]) => {
+                        const next = [...x];
+                        next[i] = Math.round(v);
+                        setX(next);
+                      }} 
+                    />
+                    <div className="text-xs text-center mt-1">{x[i]} / {q[i]}</div>
+                  </div>
+                  <div className="col-span-3">{q[i] - x[i]} × {wOtherClamped[i].toFixed(0)} = {((q[i] - x[i]) * wOtherClamped[i]).toFixed(0)} pt</div>
                 </div>
               ))}
-            </div>
+              <div className="grid grid-cols-12 gap-2 text-sm font-semibold pt-2 border-t">
+                <div className="col-span-3">Total Point</div>
+                <div className="col-span-3 text-blue-600">self: {totalSelf.toFixed(0)}</div>
+                <div className="col-span-3" />
+                <div className="col-span-3 text-blue-600">other: {totalOther.toFixed(0)}</div>
+              </div>
+            </CardContent>
+          </Card>
 
+          <div className="grid md:grid-cols-2 gap-6">
             <div className="space-y-3">
               <div className="flex items-center gap-3">
                 <Label className="w-28 text-sm text-muted-foreground">θ (deg)</Label>
@@ -356,14 +369,17 @@ export default function EmotionBeltScatterExplorer() {
                 <span className="text-xs tabular-nums w-10 text-right">{sadBand.toFixed(3)}</span>
               </div>
             </div>
-          </div>
-
-          <div className="grid lg:grid-cols-2 gap-6">
-            <div className="space-y-4">
+            
+            <div className="space-y-3">
               <div className="flex items-center gap-3">
                 <Label className="w-28 text-sm text-muted-foreground">w_max</Label>
                 <Input type="number" step={1} min={0} value={wMax} onChange={(e) => setWMax(Math.max(0, parseInt(e.target.value) || 0))} className="w-28" />
               </div>
+            </div>
+          </div>
+
+          <div className="grid lg:grid-cols-2 gap-6">
+            <div className="space-y-4">
               <WeightSliderRow label="w_self (proposer)" values={wSelf} setValues={setWSelf} wMax={wMax} />
               <WeightSliderRow label="w_other (emotion expresser)" values={wOther} setValues={setWOther} wMax={wMax} />
             </div>
