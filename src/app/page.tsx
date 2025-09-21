@@ -6,31 +6,18 @@ import { Slider } from "@/components/ui/slider";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  Tooltip,
-  Legend,
-  ResponsiveContainer,
-  ReferenceLine,
-  ScatterChart,
-  Scatter,
-  CartesianGrid,
-} from "recharts";
+import { LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, ReferenceLine } from "recharts";
 import { motion } from "framer-motion";
 
 /*
-  Emotion Belt Scatter Explorer (self/other, probability-normalized)
-  -----------------------------------------------------------------
-  要件:
-  - w は 1 刻みで調整（±w_max の範囲、符号付き）
-  - 横軸 = Σ_i x_i * w_self,i（self の価値）
-  - 縦軸 = Σ_i (q_i − x_i) * w_other,i（other の価値）
-  - θ を固定して、全候補 x の組み合わせを点でプロット
-  - 各点の色は other の表出感情（満足度 S に基づく g_k を正規化 → argmax）
-  - 上部には従来の θ→感情尤度のラインチャートも残して比較可能に
+  Emotion Likelihood Explorer (division slider classic + q editor)
+  ---------------------------------------------------------------
+  - 配分 (x_i) は 0..q_i の 1 刻みスライダー（テーブル形式へ“戻す”）
+  - 列: Your Item / Your Point = q_i × w_self,i / Division (x_i / q_i) / Opponent Point = q_i × w_other,i
+  - 合計ポイント: self = Σ x_i w_self,i, other = Σ (q_i − x_i) w_other,i
+  - q を直接編集できる UI を追加（各イシューごとに整数入力）
+  - グラフは other の感情尤度 P_other(E | θ, x, w_self, w_other)
+  - 効用: U^other = cosθ <w_other, q−x> + sinθ <w_self, x>
 */
 
 const deg2rad = (d: number) => (Math.PI / 180) * d;
@@ -59,21 +46,28 @@ function clamp(v: number, lo: number, hi: number) {
 }
 
 function clampWeights(w: number[], wmax: number) {
-  return w.map((wi) => Math.round(clamp(wi, -wmax, wmax))); // ← 1刻み想定
+  return w.map((wi) => clamp(wi, -wmax, wmax));
 }
 
-// 効用（other 視点; self/other 役割分離）
+// 効用（other 視点）
 function utility(thetaRad: number, wSelf: number[], wOther: number[], x: number[], q: number[]) {
-  const xOther = add(q, x, -1); // other の取り分 = q − x
+  const xOther = add(q, x, -1);
   return Math.cos(thetaRad) * dot(wOther, xOther) + Math.sin(thetaRad) * dot(wSelf, x);
 }
 
-// 満足度 S = exp(β (U − Umax))
-function satisfactionGivenUmax(
-  u: number,
-  umax: number,
+// 満足度
+function satisfaction(
+  thetaRad: number,
+  wSelf: number[],
+  wOther: number[],
+  x: number[],
+  q: number[],
   beta: number,
+  candX: number[][]
 ) {
+  let umax = -Infinity;
+  for (const xx of candX) umax = Math.max(umax, utility(thetaRad, wSelf, wOther, xx, q));
+  const u = utility(thetaRad, wSelf, wOther, x, q);
   return Math.exp(beta * (u - umax));
 }
 
@@ -102,153 +96,88 @@ function scoresToProbs(scores: { [k: string]: number }, eps = 1e-9) {
 }
 
 const EMO_COLORS: Record<string, string> = {
-  Anger: "#f28e8e",   // pinkish red
-  Sad: "#7d7aa6",     // muted purple
-  Neutral: "#bfecc5", // pale green
-  Joy: "#f5c04a",     // warm yellow
+  Anger: "#d62728",
+  Sad: "#9467bd",
+  Neutral: "#7f7f7f",
+  Joy: "#2ca02c",
 };
 
-// ラベル順序
-const EMO_ORDER = ["Joy", "Neutral", "Sad", "Anger"] as const;
-
-function WeightSliderRow({ label, values, setValues, wMax }: { label: string; values: number[]; setValues: (v: number[]) => void; wMax: number; }) {
+function SliderField({ label, value, onChange, min = 0, max = 1, step = 0.01, }: { label: string; value: number; onChange: (v: number[]) => void; min?: number; max?: number; step?: number; }) {
   return (
     <div className="space-y-2">
-      <Label className="text-sm">{label} (step=1)</Label>
-      <div className="grid grid-cols-4 gap-2">
-        {values.map((wi, i) => (
-          <Slider key={i} value={[wi]} min={-wMax} max={wMax} step={1} onValueChange={([v]) => {
-            const next = [...values];
-            next[i] = Math.round(v);
-            setValues(next);
-          }} />
-        ))}
+      <div className="flex justify-between">
+        <Label className="text-sm text-muted-foreground">{label}</Label>
+        <span className="text-xs tabular-nums">{value.toFixed(3)}</span>
       </div>
-      <p className="text-xs text-muted-foreground">current: [{values.map((v) => v.toFixed(0)).join(", ")}]</p>
+      <Slider value={[value]} min={min} max={max} step={step} onValueChange={(arr) => onChange(arr)} />
     </div>
   );
 }
 
-export default function EmotionBeltScatterExplorer() {
-  // --- Parameters ---
+export default function LikelihoodExplorer() {
   const [q, setQ] = useState<number[]>([7, 5, 5, 5]);
   const [x, setX] = useState<number[]>([3, 2, 2, 1]);
-  const [wSelf, setWSelf] = useState<number[]>([2, 1, 0, -1]);
-  const [wOther, setWOther] = useState<number[]>([2, 0, -1, 1]);
+  const [wSelf, setWSelf] = useState<number[]>([0.6, 0.2, 0.1, 0.1]);
+  const [wOther, setWOther] = useState<number[]>([0.5, -0.2, 0.3, 0.1]);
   const [wMax, setWMax] = useState<number>(4);
   const [beta, setBeta] = useState<number>(0.8);
   const [tau1, setTau1] = useState<number>(0.4);
   const [tau2, setTau2] = useState<number>(0.7);
   const [sadBand, setSadBand] = useState<number>(0.02);
-  const [thetaDeg, setThetaDeg] = useState<number>(45);
-  const [thetaStep, setThetaStep] = useState<number>(1); // for line chart only
+  const [thetaStep, setThetaStep] = useState<number>(1);
 
-  // クリップ（±w_max、1刻み）
   const wSelfClamped = useMemo(() => clampWeights(wSelf, wMax), [wSelf, wMax]);
   const wOtherClamped = useMemo(() => clampWeights(wOther, wMax), [wOther, wMax]);
-
   const candX = useMemo(() => enumerateCandX(q.map((v) => Math.round(v))), [q]);
 
-  // ---- ラインチャート（θ→感情尤度）: 参考用 ----
-  const lineData = useMemo(() => {
+  const data = useMemo(() => {
     const rows: Array<{ [k: string]: number }> = [];
     for (let th = -90; th <= 90; th += thetaStep) {
-      // Umax を一度だけ計算
-      const thetaRad = deg2rad(th);
-      let umax = -Infinity;
-      for (const xx of candX) {
-        const u = utility(thetaRad, wSelfClamped, wOtherClamped, xx, q);
-        if (u > umax) umax = u;
-      }
-      // 提案 x の満足度
-      const u = utility(thetaRad, wSelfClamped, wOtherClamped, x, q);
-      const S = satisfactionGivenUmax(u, umax, beta);
-      const probs = scoresToProbs(emotionScoresFromS(S, tau1, tau2, sadBand));
-      rows.push({ theta: th, ...probs });
+      const S = satisfaction(deg2rad(th), wSelfClamped, wOtherClamped, x, q, beta, candX);
+      const emoScores = emotionScoresFromS(S, tau1, tau2, sadBand);
+      const emoProbs = scoresToProbs(emoScores);
+      rows.push({ theta: th, ...emoProbs });
     }
     return rows;
   }, [wSelfClamped, wOtherClamped, x, q, beta, tau1, tau2, sadBand, thetaStep, candX]);
 
-  // ---- スキャッター: 全候補 x の (selfValue, otherValue) と感情分類 ----
-  const scatterGroups = useMemo(() => {
-    const groups: Record<string, Array<{ sx: number; oy: number }>> = {
-      Joy: [], Neutral: [], Sad: [], Anger: []
-    };
-
-    const thetaRad = deg2rad(thetaDeg);
-    let umax = -Infinity;
-    // 先に Umax
-    for (const xx of candX) {
-      const u = utility(thetaRad, wSelfClamped, wOtherClamped, xx, q);
-      if (u > umax) umax = u;
-    }
-
-    // 各候補を分類
-    for (const xx of candX) {
-      const u = utility(thetaRad, wSelfClamped, wOtherClamped, xx, q);
-      const S = satisfactionGivenUmax(u, umax, beta);
-      const probs = scoresToProbs(emotionScoresFromS(S, tau1, tau2, sadBand));
-      // argmax
-      let best = "Joy" as keyof typeof probs;
-      let bestVal = probs[best];
-      (Object.keys(probs) as Array<keyof typeof probs>).forEach((k) => {
-        if (probs[k] > bestVal) { best = k; bestVal = probs[k]; }
-      });
-
-      const selfVal = dot(wSelfClamped, xx);
-      const otherVal = dot(wOtherClamped, add(q, xx, -1));
-      groups[best].push({ sx: selfVal, oy: otherVal });
-    }
-    return groups;
-  }, [thetaDeg, wSelfClamped, wOtherClamped, q, candX, beta, tau1, tau2, sadBand]);
-
-  // 軸の範囲を自動で
-  const xyExtent = useMemo(() => {
-    const all = ([] as Array<{ sx: number; oy: number }>).concat(
-      scatterGroups.Joy,
-      scatterGroups.Neutral,
-      scatterGroups.Sad,
-      scatterGroups.Anger,
-    );
-    const xs = all.map((d) => d.sx);
-    const ys = all.map((d) => d.oy);
-    const xmin = Math.min(...xs, 0);
-    const xmax = Math.max(...xs, 1);
-    const ymin = Math.min(...ys, 0);
-    const ymax = Math.max(...ys, 1);
-    return { xmin, xmax, ymin, ymax };
-  }, [scatterGroups]);
-
   const reset = () => {
     setQ([7, 5, 5, 5]);
     setX([3, 2, 2, 1]);
-    setWSelf([2, 1, 0, -1]);
-    setWOther([2, 0, -1, 1]);
+    setWSelf([0.6, 0.2, 0.1, 0.1]);
+    setWOther([0.5, -0.2, 0.3, 0.1]);
     setWMax(4);
     setBeta(0.8);
     setTau1(0.4);
     setTau2(0.7);
     setSadBand(0.02);
-    setThetaDeg(45);
     setThetaStep(1);
   };
 
+  // 表示用: 各列の値
+  const qSelfVals = q.map((qi, i) => qi * wSelfClamped[i]);
+  const qOtherVals = q.map((qi, i) => qi * wOtherClamped[i]);
+
+  // 合計ポイント: self = Σ x_i w_self,i, other = Σ (q_i − x_i) w_other,i
+  const totalSelf = x.reduce((s, xi, i) => s + xi * wSelfClamped[i], 0);
+  const totalOther = x.reduce((s, xi, i) => s + (q[i] - xi) * wOtherClamped[i], 0);
+
   return (
-    <div className="p-6 grid gap-6 2xl:grid-cols-2">
+    <div className="p-6 grid gap-6 lg:grid-cols-2">
       <motion.h1 initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} className="text-2xl font-semibold">
-        Emotion Belt Explorer (scatter region + θ-scan)
+        Emotion Likelihood Explorer (self/other)
       </motion.h1>
 
-      {/* ---- θ→感情尤度（参考） ---- */}
-      <Card className="shadow-md">
+      {/* 感情尤度グラフ */}
+      <Card className="lg:row-span-2 shadow-md">
         <CardContent className="pt-6">
-          <div className="h-[320px]">
+          <div className="h-[420px]">
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={lineData} margin={{ left: 8, right: 8, top: 8, bottom: 8 }}>
+              <LineChart data={data} margin={{ left: 8, right: 8, top: 8, bottom: 8 }}>
                 <XAxis dataKey="theta" type="number" domain={[-90, 90]} tickCount={13}
                   label={{ value: "θ (deg)", position: "insideBottom", dy: 10 }} />
                 <YAxis domain={[0, 1]} tickCount={6}
-                  label={{ value: "P_other(E | θ, x, w_self, w_other)", angle: -90, position: "insideLeft" }} />
+                  label={{ value: "probability", angle: -90, position: "insideLeft" }} />
                 <Tooltip formatter={(v: number) => v.toFixed(3)} />
                 <Legend />
                 <ReferenceLine x={0} strokeDasharray="3 3" />
@@ -262,98 +191,103 @@ export default function EmotionBeltScatterExplorer() {
         </CardContent>
       </Card>
 
-      {/* ---- スキャッター（候補 x の全点） ---- */}
+      {/* q 編集 + Division（スライダー） */}
       <Card className="shadow-md">
-        <CardContent className="pt-6">
-          <div className="h-[520px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <ScatterChart margin={{ left: 8, right: 8, top: 8, bottom: 8 }}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis type="number" dataKey="sx" domain={[xyExtent.xmin, xyExtent.xmax]}
-                  label={{ value: "Self value Σ x_i w_self,i", position: "insideBottom", dy: 10 }} />
-                <YAxis type="number" dataKey="oy" domain={[xyExtent.ymin, xyExtent.ymax]}
-                  label={{ value: "Other value Σ (q_i − x_i) w_other,i", angle: -90, position: "insideLeft" }} />
-                <Legend />
-                <Tooltip cursor={{ strokeDasharray: "3 3" }} formatter={(v: number, n: string) => v.toFixed(2)} />
-                {EMO_ORDER.map((emo) => (
-                  <Scatter key={emo} name={emo} data={scatterGroups[emo]} fill={EMO_COLORS[emo]} />
-                ))}
-              </ScatterChart>
-            </ResponsiveContainer>
+        <CardContent className="pt-6 space-y-6">
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-medium">Division (x is self share, q − x is other share)</h2>
+            <Button variant="outline" onClick={reset}>Reset</Button>
+          </div>
+
+          {/* q editor */}
+          <div className="space-y-3">
+            <Label className="text-sm text-muted-foreground">q (total quantities) — change to adjust slider ranges</Label>
+            <div className="grid grid-cols-4 gap-2">
+              {q.map((qi, i) => (
+                <Input key={i} type="number" min={0} step={1} value={qi} onChange={(e) => {
+                  const v = Math.max(0, Math.round(parseFloat(e.target.value)) || 0);
+                  const next = [...q];
+                  // x_i を超えないようにクランプ
+                  if (x[i] > v) {
+                    const nx = [...x];
+                    nx[i] = v;
+                    setX(nx);
+                  }
+                  next[i] = v;
+                  setQ(next);
+                }} />
+              ))}
+            </div>
+          </div>
+
+          {/* Division table */}
+          <div className="grid grid-cols-12 gap-2 text-sm font-medium">
+            <div className="col-span-3">Your Item</div>
+            <div className="col-span-3">Your Point = q_i × w_self,i</div>
+            <div className="col-span-4">Division (x_i / q_i)</div>
+            <div className="col-span-2">Opponent Point = q_i × w_other,i</div>
+          </div>
+
+          {[0,1,2,3].map((i) => (
+            <div key={i} className="grid grid-cols-12 items-center gap-2 text-sm">
+              <div className="col-span-3">Item {i+1}</div>
+              <div className="col-span-3">{q[i]} × {wSelfClamped[i].toFixed(1)} pt</div>
+              <div className="col-span-4">
+                <Slider value={[x[i]]} min={0} max={q[i]} step={1} onValueChange={([v]) => {
+                  const next = [...x];
+                  next[i] = Math.round(v);
+                  setX(next);
+                }} />
+              </div>
+              <div className="col-span-2">{q[i]} × {wOtherClamped[i].toFixed(1)} pt</div>
+            </div>
+          ))}
+
+          <div className="pt-4 border-t" />
+          <div className="flex items-center justify-between text-sm font-semibold">
+            <span>Total Point</span>
+            <div className="flex items-center gap-8">
+              <span className="text-blue-600">self: {totalSelf.toFixed(1)}</span>
+              <span className="text-blue-600">other: {totalOther.toFixed(1)}</span>
+            </div>
           </div>
         </CardContent>
       </Card>
 
-      {/* ---- 操作パネル ---- */}
-      <Card className="2xl:col-span-2 shadow-md">
-        <CardContent className="pt-6 space-y-6">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-medium">Controls</h2>
-            <Button variant="outline" onClick={reset}>Reset</Button>
+      {/* 重み編集（必要なら） */}
+      <Card className="lg:col-span-2 shadow-md">
+        <CardContent className="pt-6 space-y-4">
+          <h2 className="text-lg font-medium">Issue weights (signed; |w_i| ≤ w_max)</h2>
+          <div className="flex items-center gap-3">
+            <Label className="w-28 text-sm text-muted-foreground">w_max</Label>
+            <Input type="number" step={0.1} min={0} value={wMax} onChange={(e) => setWMax(Math.max(0, parseFloat(e.target.value) || 0))} className="w-28" />
           </div>
-
           <div className="grid md:grid-cols-2 gap-6">
-            <div className="space-y-4">
-              <Label className="text-sm text-muted-foreground">Division (x: self share, q − x: other share)</Label>
-              {[0,1,2,3].map((i) => (
-                <div key={i} className="flex items-center gap-3">
-                  <span className="w-12 text-xs">x[{i}]</span>
-                  <Slider value={[x[i]]} min={0} max={q[i]} step={1} onValueChange={([v]) => {
-                    const next = [...x];
-                    next[i] = Math.round(v);
-                    setX(next);
-                  }} className="flex-1" />
-                  <span className="w-10 text-xs text-right">{x[i]}</span>
-                </div>
-              ))}
-            </div>
-
-            <div className="space-y-3">
-              <div className="flex items-center gap-3">
-                <Label className="w-28 text-sm text-muted-foreground">θ (deg)</Label>
-                <Slider value={[thetaDeg]} min={-90} max={90} step={1} onValueChange={([v]) => setThetaDeg(Math.round(v))} className="flex-1" />
-                <span className="text-xs tabular-nums w-10 text-right">{thetaDeg}</span>
-              </div>
-              <div className="flex items-center gap-3">
-                <Label className="w-28 text-sm text-muted-foreground">β</Label>
-                <Slider value={[beta]} min={0} max={4} step={0.05} onValueChange={([v]) => setBeta(v)} className="flex-1" />
-                <span className="text-xs tabular-nums w-10 text-right">{beta.toFixed(2)}</span>
-              </div>
-              <div className="flex items-center gap-3">
-                <Label className="w-28 text-sm text-muted-foreground">τ1</Label>
-                <Slider value={[tau1]} min={0.05} max={0.9} step={0.005} onValueChange={([v]) => setTau1(v)} className="flex-1" />
-                <span className="text-xs tabular-nums w-10 text-right">{tau1.toFixed(3)}</span>
-              </div>
-              <div className="flex items-center gap-3">
-                <Label className="w-28 text-sm text-muted-foreground">τ2</Label>
-                <Slider value={[tau2]} min={0.1} max={0.98} step={0.005} onValueChange={([v]) => setTau2(v)} className="flex-1" />
-                <span className="text-xs tabular-nums w-10 text-right">{tau2.toFixed(3)}</span>
-              </div>
-              <div className="flex items-center gap-3">
-                <Label className="w-28 text-sm text-muted-foreground">sad_band</Label>
-                <Slider value={[sadBand]} min={0.005} max={0.1} step={0.001} onValueChange={([v]) => setSadBand(v)} className="flex-1" />
-                <span className="text-xs tabular-nums w-10 text-right">{sadBand.toFixed(3)}</span>
+            <div className="space-y-2">
+              <Label className="text-sm">w_self (self / proposer)</Label>
+              <div className="grid grid-cols-4 gap-2">
+                {wSelf.map((wi, i) => (
+                  <Input key={i} type="number" step={0.1} value={wi} onChange={(e) => {
+                    const v = parseFloat(e.target.value);
+                    const next = [...wSelf];
+                    next[i] = isNaN(v) ? 0 : v;
+                    setWSelf(next);
+                  }} />
+                ))}
               </div>
             </div>
-          </div>
-
-          <div className="grid lg:grid-cols-2 gap-6">
-            <div className="space-y-4">
-              <div className="flex items-center gap-3">
-                <Label className="w-28 text-sm text-muted-foreground">w_max</Label>
-                <Input type="number" step={1} min={0} value={wMax} onChange={(e) => setWMax(Math.max(0, parseInt(e.target.value) || 0))} className="w-28" />
+            <div className="space-y-2">
+              <Label className="text-sm">w_other (other / emotion expresser)</Label>
+              <div className="grid grid-cols-4 gap-2">
+                {wOther.map((wi, i) => (
+                  <Input key={i} type="number" step={0.1} value={wi} onChange={(e) => {
+                    const v = parseFloat(e.target.value);
+                    const next = [...wOther];
+                    next[i] = isNaN(v) ? 0 : v;
+                    setWOther(next);
+                  }} />
+                ))}
               </div>
-              <WeightSliderRow label="w_self (proposer)" values={wSelf} setValues={setWSelf} wMax={wMax} />
-              <WeightSliderRow label="w_other (emotion expresser)" values={wOther} setValues={setWOther} wMax={wMax} />
-            </div>
-
-            <div className="space-y-2 text-sm text-muted-foreground">
-              <p>Notes:</p>
-              <ul className="list-disc pl-5 space-y-1">
-                <li>横軸 = 自分の価値 Σ x_i w_self,i、縦軸 = 相手の価値 Σ (q_i − x_i) w_other,i。</li>
-                <li>各点は候補 x の組（整数格子）。色は other の表出感情（Joy/Neutral/Sad/Anger）。</li>
-                <li>q を大きくすると点の数が指数的に増えるので注意（現在 4 次元）。</li>
-              </ul>
             </div>
           </div>
         </CardContent>
