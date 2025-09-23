@@ -266,7 +266,6 @@ export default function EmotionBeltScatterExplorer() {
       </motion.h1>
 
       {/* ---- θ→感情尤度（参考） ---- */}
-      {/*
       <Card className="shadow-md">
         <CardContent className="pt-6">
           <div className="h-[320px]">
@@ -288,9 +287,9 @@ export default function EmotionBeltScatterExplorer() {
           </div>
         </CardContent>
       </Card>
-      */}
 
       {/* ---- スキャッター（候補 x の全点） ---- */}
+      {/*
       <Card className="shadow-md">
         <CardContent className="pt-6">
           <div className="h-[520px]">
@@ -311,6 +310,7 @@ export default function EmotionBeltScatterExplorer() {
           </div>
         </CardContent>
       </Card>
+      */}
 
       {/* ---- 操作パネル ---- */}
       <Card className="2xl:col-span-2 shadow-md">
