@@ -68,6 +68,12 @@ function utility(thetaRad: number, wSelf: number[], wOther: number[], x: number[
   return Math.cos(thetaRad) * dot(wOther, xOther) + Math.sin(thetaRad) * dot(wSelf, x);
 }
 
+// 追加: 効用の下限クリップ
+function clampUtility(u: number, uMin: number) {
+  return Math.max(u, uMin);
+}
+
+
 // 満足度 S = exp(β (U − Umax))
 function satisfactionGivenUmax(
   u: number,
@@ -142,6 +148,9 @@ export default function EmotionBeltScatterExplorer() {
   const [sadBand, setSadBand] = useState<number>(0.02);
   const [thetaDeg, setThetaDeg] = useState<number>(45);
   const [thetaStep, setThetaStep] = useState<number>(1); // for line chart only
+  // --- Parameters ---
+  const [uMin, setUMin] = useState<number>(0); // ← 追加: 最低効用。デフォルトは 0 を推奨
+
 
   // クリップ（±w_max、1刻み）
   const wSelfClamped = useMemo(() => clampWeights(wSelf, wMax), [wSelf, wMax]);
@@ -165,18 +174,22 @@ export default function EmotionBeltScatterExplorer() {
       // Umax を一度だけ計算
       const thetaRad = deg2rad(th);
       let umax = -Infinity;
+      // 1) まず Umax を計算（uMin で下限クリップしてから最大を取る）
       for (const xx of candX) {
-        const u = utility(thetaRad, wSelfClamped, wOtherClamped, xx, q);
-        if (u > umax) umax = u;
+        const uRaw = utility(thetaRad, wSelfClamped, wOtherClamped, xx, q);
+        const uClamped = clampUtility(uRaw, uMin);
+        if (uClamped > umax) umax = uClamped;
       }
-      // 提案 x の満足度
-      const u = utility(thetaRad, wSelfClamped, wOtherClamped, x, q);
-      const S = satisfactionGivenUmax(u, umax, beta);
+      // 2) 提案 x の満足度も“クリップ後”の U で
+      const uRaw = utility(thetaRad, wSelfClamped, wOtherClamped, x, q);
+      const uClamped = clampUtility(uRaw, uMin);
+      const S = satisfactionGivenUmax(uClamped, umax, beta);
+
       const probs = scoresToProbs(emotionScoresFromS(S, tau1, tau2, sadBand));
       rows.push({ theta: th, ...probs });
     }
     return rows;
-  }, [wSelfClamped, wOtherClamped, x, q, beta, tau1, tau2, sadBand, thetaStep, candX]);
+  }, [wSelfClamped, wOtherClamped, x, q, beta, tau1, tau2, sadBand, thetaStep, candX, uMin]);
 
   // ---- スキャッター: 全候補 x の (selfValue, otherValue) と感情分類 ----
   const scatterGroups = useMemo(() => {
@@ -186,18 +199,21 @@ export default function EmotionBeltScatterExplorer() {
 
     const thetaRad = deg2rad(thetaDeg);
     let umax = -Infinity;
-    // 先に Umax
+    // Umax（クリップ後の値で最大）
     for (const xx of candX) {
-      const u = utility(thetaRad, wSelfClamped, wOtherClamped, xx, q);
-      if (u > umax) umax = u;
+      const uRaw = utility(thetaRad, wSelfClamped, wOtherClamped, xx, q);
+      const uClamped = clampUtility(uRaw, uMin);
+      if (uClamped > umax) umax = uClamped;
     }
 
-    // 各候補を分類
+    // 各候補を分類（クリップ後の U を使用）
     for (const xx of candX) {
-      const u = utility(thetaRad, wSelfClamped, wOtherClamped, xx, q);
-      const S = satisfactionGivenUmax(u, umax, beta);
+      const uRaw = utility(thetaRad, wSelfClamped, wOtherClamped, xx, q);
+      const uClamped = clampUtility(uRaw, uMin);
+      const S = satisfactionGivenUmax(uClamped, umax, beta);
       const probs = scoresToProbs(emotionScoresFromS(S, tau1, tau2, sadBand));
-      // argmax
+
+      // argmax は現状のまま
       let best = "Joy" as keyof typeof probs;
       let bestVal = probs[best];
       (Object.keys(probs) as Array<keyof typeof probs>).forEach((k) => {
@@ -209,7 +225,7 @@ export default function EmotionBeltScatterExplorer() {
       groups[best].push({ sx: selfVal, oy: otherVal });
     }
     return groups;
-  }, [thetaDeg, wSelfClamped, wOtherClamped, q, candX, beta, tau1, tau2, sadBand]);
+  }, [thetaDeg, wSelfClamped, wOtherClamped, q, candX, beta, tau1, tau2, sadBand, uMin]);
 
   // 軸の範囲を自動で
   const xyExtent = useMemo(() => {
@@ -240,6 +256,7 @@ export default function EmotionBeltScatterExplorer() {
     setSadBand(0.02);
     setThetaDeg(45);
     setThetaStep(1);
+    setUMin(0);
   };
 
   return (
@@ -374,6 +391,19 @@ export default function EmotionBeltScatterExplorer() {
               <div className="flex items-center gap-3">
                 <Label className="w-28 text-sm text-muted-foreground">w_max</Label>
                 <Input type="number" step={1} min={0} value={wMax} onChange={(e) => setWMax(Math.max(0, parseInt(e.target.value) || 0))} className="w-28" />
+              </div>
+              <div className="flex items-center gap-3">
+                <Label className="w-28 text-sm text-muted-foreground">u_min</Label>
+                <Input
+                  type="number"
+                  step={1}
+                  value={uMin}
+                  onChange={(e) => setUMin(Number(e.target.value))}
+                  className="w-28"
+                />
+                <span className="text-xs text-muted-foreground">
+                  Floor for utility U (clip: U = max(U, u_min))
+                </span>
               </div>
             </div>
           </div>
