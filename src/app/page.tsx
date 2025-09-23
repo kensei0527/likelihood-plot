@@ -267,7 +267,7 @@ export default function EmotionBeltScatterExplorer() {
       </Card>
 
       {/* ---- スキャッター（候補 x の全点） ---- */}
-      {/*<Card className="shadow-md">
+      <Card className="shadow-md">
         <CardContent className="pt-6">
           <div className="h-[520px]">
             <ResponsiveContainer width="100%" height="100%">
@@ -286,7 +286,7 @@ export default function EmotionBeltScatterExplorer() {
             </ResponsiveContainer>
           </div>
         </CardContent>
-      </Card>*/}
+      </Card>
 
       {/* ---- 操作パネル ---- */}
       <Card className="2xl:col-span-2 shadow-md">
