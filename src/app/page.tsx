@@ -131,10 +131,10 @@ export default function EmotionBeltScatterExplorer() {
   // --- Parameters ---
   const [q, setQ] = useState<number[]>([7, 5, 5, 5]);
   const [x, setX] = useState<number[]>([3, 2, 2, 1]);
-  const [wSelf, setWSelf] = useState<number[]>([2, 1, 0, -1]);
-  const [wOther, setWOther] = useState<number[]>([2, 0, -1, 1]);
+  const [wSelf, setWSelf] = useState<number[]>([4, 0, 2, -2]);
+  const [wOther, setWOther] = useState<number[]>([4, 1, -2, 0]);
   const [wMax, setWMax] = useState<number>(4);
-  const [beta, setBeta] = useState<number>(0.8);
+  const [beta, setBeta] = useState<number>(0.1);
   const [tau1, setTau1] = useState<number>(0.4);
   const [tau2, setTau2] = useState<number>(0.7);
   const [sadBand, setSadBand] = useState<number>(0.02);
